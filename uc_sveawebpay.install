@@ -1,0 +1,22 @@
+<?php
+
+/**
+ * @file
+ * Installation file for SveaWebPay.
+ */
+
+
+/**
+ * Implements hook_install().
+ */
+function uc_sveawebpay_install() {
+  db_query("INSERT INTO {uc_order_statuses} (order_status_id, title, state, weight, locked) VALUES ('sveawebpay_pending', '%s', 'payment_received', 7, 1);", t('SveaWebPay pending'));
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function uc_sveawebpay_uninstall() {
+  db_query("DELETE FROM {variable} WHERE name LIKE 'uc_sveawebpay_%%'");
+}
+

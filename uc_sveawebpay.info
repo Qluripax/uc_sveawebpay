@@ -1,0 +1,8 @@
+name = SveaWebPay
+description = Integrates <a href="http://www.sveawebpay.se">SveaWebPay</a> as an payment method for Ubercart.
+dependencies[] = uc_payment
+package = Ubercart - payment
+core = 6.x
+
+version = 6.x-dev-120201
+

@@ -1,0 +1,449 @@
+<?php
+
+/**
+ * @file
+ * Integrates SveaWebPay payment services with Ubercart.
+ *
+ * Development sponsored by: SveaWebPay - http://sveawebpay.se
+ * Module built by Qluripax, magnus@docilitas.se
+ */
+
+
+/**
+ * Implements hook_menu().
+ */
+function uc_sveawebpay_menu() {
+  // Callback functions for Website Payments Standard.
+  $items['uc_sveawebpay/complete/%uc_order'] = array(
+    'title' => 'SveaWebPay payment complete',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('uc_sveawebpay_complete', 2),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+    'file' => 'uc_sveawebpay.pages.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function uc_sveawebpay_form_alter(&$form, $form_state, $form_id) {
+  if ($form_id == 'uc_cart_checkout_review_form' && ($order_id = intval($_SESSION['cart_order'])) > 0) {
+    $order = uc_order_load($order_id);
+
+    if ($order->payment_method == 'sveawebpay_hosted_payment') {
+      unset($form['submit']);
+      $form['#prefix'] = '<table style="display: inline; padding-top: 1em;"><tr><td>';
+      $form['#suffix'] = '</td><td>' . drupal_get_form('uc_sveawebpay_form', $order) . '</td></tr></table>';
+
+    }
+  }
+}
+
+/**
+ * Implements hook_payment_method().
+ */
+function uc_sveawebpay_payment_method() {
+  $payment_methods = uc_sveawebpay_show_payment_methods(variable_get('uc_svea_payment_metods', ''));
+
+  $methods[] = array(
+    'id' => 'sveawebpay_hosted_payment',
+    'name' => t('SveaWebPay Hosted Payment'),
+    'title' => $payment_methods,
+    'desc' => t('Redirect users to submit payments through SveaWebPay.'),
+    'callback' => 'uc_payment_method_sveawebpay',
+    'weight' => 1,
+    'checkout' => FALSE,
+    'no_gateway' => TRUE,
+  );
+
+  return $methods;
+}
+
+/**
+ * Settings for SveaWebPay on the Payment gateways form.
+ */
+function uc_sveawebpay_settings_form() {
+   
+  $form['uc_svea_transaction_mode'] = array(
+    '#type' => 'select',
+    '#title' => t('Transaction Mode'),
+    '#description' => t('Transaction mode used for processing orders. During testphase transaction mode should be test, preventing "real payment" be made.
+      When your site is stable and ready for production, switch transaction mode to stable.'),
+    '#options' => array(
+      'https://test.sveaekonomi.se/webpay/payment' => t('Test mode'),
+      'https://webpay.sveaekonomi.se/webpay/payment' => t('Production'),
+    ),
+    '#default_value' => variable_get('uc_svea_transaction_mode', 'https://test.sveaekonomi.se/webpay/payment'),
+  );
+  $form['svea'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('SveaWebPay Merchant Information'),
+    '#description' => t('To be able to use SveaWebPay as your Payment supplier You must be an customer at SveaWebPay. !link for information on obtaining credentials etc.  You need to have an Merchant ID and an Secret Word from SveaWebPay.', array('!link' => l(t('Click here'), 'http://www.sveawebpay.com/kontakta-oss/'))),
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+  );
+  $form['svea']['uc_svea_merchantid'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Merchant ID'),
+    '#default_value' => variable_get('uc_svea_merchantid', ''),
+  );
+  $form['svea']['uc_svea_secretword'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Secret word'),
+    '#default_value' => variable_get('uc_svea_secretword', ''),
+  );
+  $form['methods'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('SveaWebPay, configured Payment Methods'),
+    '#collapsible' => TRUE,
+  );
+  $api_answer = uc_sveawebpay_api_request('getpaymentmethods');
+  $payment_methods = uc_sveawebpay_show_payment_methods($api_answer['paymentmethods']['paymentmethod']);
+  variable_set('uc_svea_payment_metods', $api_answer['paymentmethods']['paymentmethod']);
+  $form['methods']['payment_metods'] = array(
+    '#type' => 'item',
+    '#value' => $payment_methods,
+    '#description' => t('The payment methods are configured on your account at SveaWebPay. To change available payment methods please contact SveaWebPay.'),
+  );
+  $form['faktura'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('SveaWebPay Faktura (invoice)'),
+    '#collapsible' => TRUE,
+  );
+  $invoice_description = t('Invoicing can only be made to people written in Sweden. Therefore SveaWebPay Faktura (invoice) is unactive by default.');
+  $invoice_description .= '<br />' . t('Prices must be given exclusive VAT otherwise you risk rounding errors.');
+  $invoice_can_be_enabled = (module_exists('uc_vat') && (module_exists('securepages') || module_exists('uc_ssl')));
+  if (!$invoice_can_be_enabled) {
+    $missed_modules = array();
+    if (!module_exists('uc_vat')) {
+      $missed_modules['uc_vat'] = url('http://drupal.org/project/uc_vat');
+    }
+    if (!module_exists('securepages')) {
+      $missed_modules['securepages'] = url('http://drupal.org/project/securepages');
+    }
+    if (!module_exists('uc_ssl')) {
+      $missed_modules['uc_ssl'] = url('http://drupal.org/project/uc_ssl');
+    }
+    $invoice_description .= '<br /><b>' . t('The following') . ' ';
+    if (count($missed_modules) == 1) {
+      $invoice_description .= t('module is missing and must be enabled before invoice can be enabled:');
+    }
+    else {
+      $invoice_description .= t('modules are missing and must be enabled before invoice can be enabled:');
+    }
+    foreach ($missed_modules as $name => $url) {
+      $invoice_description .=  ' ' . l($name, $url);
+    }
+   // $invoice_description = drupal_substr($invoice_description, 0, -1);
+    $invoice_description .= '.</b>';
+  }
+  $form['faktura']['uc_svea_invoice'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Enable SveaWebPay Faktura (invoice).'),
+    '#description' => $invoice_description,
+    '#default_value' => variable_get('uc_svea_invoice', FALSE),
+    '#disabled' =>  !$invoice_can_be_enabled,
+  );
+    $form['faktura']['uc_svea_invoice_fee'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Invoice fee'),
+    '#size' => 10,
+    '#description' => t('The invoice fee is added only if the customer choose to pay with SveaWebPay Faktura. In this version the invoice fee is not sent
+        upstream to SveaWebPay, therefore you must set the corresponding value at SveaWebPay.'),
+    '#default_value' => variable_get('uc_svea_invoice_fee', ''),
+  );
+    $form['faktura']['uc_svea_invoice_feeVAT'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Invoice fee VAT'),
+    '#size' => 10,
+    '#description' => t('The invoice fee VAT, if any.'),
+    '#default_value' => variable_get('uc_svea_invoice_feeVAT', ''),
+  );
+  $form['faktura']['uc_svea_pricecalc'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Prices are given exclusive VAT.'),
+    '#description' => t('To be able to give an correct price calculation, without rounding errors, all prices must be given exclusive VAT.'),
+    '#disabled' => TRUE,
+    '#default_value' => variable_get('uc_svea_pricecalc', TRUE),
+  );
+  return $form;
+}
+
+/**
+ * Callback function for the Svea Webpay payment method.
+ */
+function uc_payment_method_sveawebpay($op, &$arg1) {
+  switch ($op) {
+    case 'cart-details':
+    case 'customer-view':
+      $details = NULL;
+      return $details;
+    case 'order-view':
+      return '';
+    case 'cart-process':
+      $_SESSION['pay_method'] = $_POST['pay_method'];
+      return;
+    case 'settings':
+      return uc_sveawebpay_settings_form();
+    case 'cart-review':
+      return '';
+  }
+}
+
+/**
+ * Returns form elements for SveaWebPay Standard form.
+ */
+function uc_sveawebpay_form($form_state, $order) {
+
+  $data = array(
+    'merchantid' => variable_get('uc_svea_merchantid', ''),
+    'message' => base64_encode(_uc_sveawebpay_xml_encode($order)),
+    'mac' => NULL,
+  );
+
+  $tax = 0;
+  if (module_exists('uc_taxes')) {
+    foreach (uc_taxes_calculate($order) as $tax_item) {
+      $tax += $tax_item->amount;
+    }
+  }
+
+  $context = array(
+    'revision' => 'formatted-original',
+    'type' => 'amount',
+  );
+  $options = array(
+    'sign' => FALSE,
+    'thou' => FALSE,
+    'dec' => '.',
+  );
+  $data['tax_cart'] = uc_price($tax, $context, $options);
+  $data['mac'] = hash('sha512', $data['message'] . variable_get('uc_svea_secretword', ''));
+
+  $form['#action'] = variable_get('uc_svea_transaction_mode', '');
+
+  foreach ($data as $name => $value) {
+    $form[$name] = array('#type' => 'hidden', '#value' => $value);
+  }
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Pay and Submit Order'),
+  );
+
+  return $form;
+}
+
+/**
+ * Submit handler for uc_sveawebpay_form().
+ *
+ * @see uc_sveawebpay_form()
+ */
+function uc_sveawebpay_form_submit($form, &$form_state) {
+  global $user;
+  $items = uc_cart_get_contents();
+
+  if (!is_array($items) || count($items) == 0) {
+    drupal_set_message(t('You do not have any items in your shopping cart.'));
+    return;
+  }
+}
+
+/**
+ * Show store specific logotypes for valid payment methods.
+ *
+ * @param $payment_methods
+ *   An array containing the current payment methods.
+ *
+ * @return
+ *   Object containing the XML-data for an payment at SveaWebPay.
+ */
+function uc_sveawebpay_show_payment_methods($payment_methods) {
+
+  if (empty($payment_methods)) {
+    $payment_methods  = array('CARD', 'DB', 'SVEAINVOICESE', 'SVEASPLITSE');
+  }
+  $path = drupal_get_path('module', 'uc_sveawebpay');
+  $logo = $path . '/images/logo.png';
+  $attributes = array(
+    'style' => 'position: relative; top: 5px; margin-right: 4px;',
+    );
+  $return = theme_image($logo, 'SveaWebPay', 'SveaWebPay', $attributes, FALSE);
+  $return .=  ' - ' . t('secure payment without sharing your financial information.');
+  $return .= '<br /><span id="sveawebpay-includes" style="padding-left: 5.5em;">';
+  $cc_types = array(
+    'CARD' => 'Kort',
+    'DB' => 'Direktbank',
+    'SVEAINVOICESE' => 'Faktura',
+    'SVEASPLITSE' => 'Delbetala',
+  );
+  foreach ($payment_methods as $method) {
+    if ($methdod == 'DBNORDEASE' || $methdod == 'DBDANSKEBANKSE' || $methdod == 'DBSWEDBANKSE' || $methdod == 'DBSEBSE' || $methdod == 'DBSHBSE') {
+      $method = 'DB';
+    }
+    $return .= theme_image($path . '/images/' . $cc_types[$method] . '-100px.png', $cc_types[$method], ' style="position: relative; top: 5px;"');
+  }
+  
+return $return;
+}
+
+/**
+ * XML-encodes an order to send to SveaWebPay.
+ *
+ * @param $order
+ *   An object containing the current order.
+ *
+ * @return
+ *   Object containing the XML-data for an payment at SveaWebPay.
+ */
+function _uc_sveawebpay_xml_encode($order) {
+  // Arrays for price formatting.
+  $context = array(
+    'revision' => 'formatted-original',
+    'type' => 'amount',
+  );
+  $options = array(
+    'sign' => FALSE,
+    'thou' => FALSE,
+    'dec' => '.',
+  );
+  $name = 'uc_sveawebpay';
+  $module = drupal_parse_info_file(drupal_get_path('module', $name) . '/' . $name . '.info');
+
+  // Create the XML-data.
+  $svea_XMLWriter = new XMLWriter();
+  $svea_XMLWriter->openMemory();
+  $svea_XMLWriter->setIndent(true);
+  $svea_XMLWriter->setIndentString("    ");
+  $svea_XMLWriter->startDocument("1.0", "UTF-8");
+  $svea_XMLWriter->startElement("payment");
+  $svea_XMLWriter->writeComment("Message generated by SveaWebPay module for Drupal/Ubercart, Version " . $module['version']);
+  $svea_XMLWriter->writeElement("customerrefno", $order->order_id);
+  $svea_XMLWriter->writeElement("currency", $order->currency);
+  $svea_XMLWriter->writeElement("amount", $order->order_total * 100);
+  $svea_XMLWriter->writeElement("returnurl", url('uc_sveawebpay/complete/' . $order->order_id, array('absolute' => TRUE)));
+  $svea_XMLWriter->writeElement("Cancelurl", url('<front>', array('absolute' => TRUE)));
+  // Create individual items for the XML.
+  $svea_XMLWriter->startElement("orderrows");
+  $context['type'] = 'order_product';
+
+  // Adjust output to two decimals, independent of decimal settings in the store.
+  $adjust_decimals = 100 / pow(10, variable_get('uc_currency_prec', 2));
+  $i = 0;
+  // Sum order VAT based on each order row.
+  $orderVAT = 0;
+  foreach ($order->products as $item) {
+    // Load the product node.
+    $node = node_load($item->nid);
+    $context = array(
+      'revision' => 'themed',
+      'type' => 'product',
+      'class' => array('product', 'sell_price'),
+      'subject' => array('node' => $node),
+    );
+    $price_incl = preg_replace('/[^0-9]*/', '', uc_price($node->sell_price, $context));
+    $price_incl = $price_incl * $adjust_decimals;
+    $price_excl = $item->price * 100;
+    $VAT = $price_incl - $price_excl;
+    $orderVAT += $VAT;
+    $order_node = node_load($item->nid);
+    $svea_XMLWriter->startElement("row");
+    $svea_XMLWriter->writeElement("name", $item->title);
+    $svea_XMLWriter->writeElement("amount", $price_incl);
+    $svea_XMLWriter->writeElement("description", $item->model);
+    $svea_XMLWriter->writeElement("quantity", $item->qty);
+    $svea_XMLWriter->writeElement("sku", $item->model);
+    $svea_XMLWriter->writeElement("unit", 'st');
+    if (variable_get('uc_svea_invoice', FALSE)) {
+      $svea_XMLWriter->writeElement("vat", $VAT);
+    }
+    // End of row.
+    $svea_XMLWriter->endElement();
+  }
+  // End of orderrows.
+  $svea_XMLWriter->endElement();
+  if (variable_get('uc_svea_invoice', FALSE)) {
+    $svea_XMLWriter->writeElement("vat", $orderVAT);
+  }
+  $svea_XMLWriter->endElement();
+  $svea_XMLWriter->endDocument();
+  $return = $svea_XMLWriter->outputMemory();
+
+  return $return;
+}
+
+/**
+ * Interaction with SveaWebPay Webservices.
+ * This version is a stub where only getpaymentmethods is implemented.
+ *
+ * @param $request
+ *   An string containing the question to send to SveaWebPay Webservices.
+ *
+ * @return
+ *   Array containing the intrepreted answer from SveaWebPay Webservices.
+ */
+function uc_sveawebpay_api_request($request) {
+
+  module_load_include('inc', 'uc_sveawebpay', 'uc_sveawebpay.pages');
+  $name = 'uc_sveawebpay';
+  $module = drupal_parse_info_file(drupal_get_path('module', $name) . '/' . $name . '.info');
+
+  // Create the starting XML-data.
+  $svea_XMLWriter = new XMLWriter();
+  $svea_XMLWriter->openMemory();
+  $svea_XMLWriter->setIndent(TRUE);
+  $svea_XMLWriter->setIndentString("    ");
+  $svea_XMLWriter->startDocument("1.0", "UTF-8");
+  $svea_XMLWriter->writeComment("Message generated by SveaWebPay module for Drupal/Ubercart, Version " . $module['version']);
+
+  // Create question specific data - only one qestion so far...
+  $transaction_mode = strpos(variable_get('uc_svea_transaction_mode', ''),'test.') > 2;
+  switch ($request) {
+    case 'getpaymentmethods':
+      $svea_XMLWriter->startElement("getpaymentmethods");
+      $svea_XMLWriter->writeElement("merchantid", variable_get('uc_svea_merchantid', ''));
+      $svea_XMLWriter->endElement();
+      $server = ($transaction_mode) ? 'https://test.sveaekonomi.se/webpay/rest/getpaymentmethods' : 'https://webpay.sveaekonomi.se/webpay/rest/getpaymentmethods';
+      break;
+  }
+
+  $svea_XMLWriter->endDocument();
+  $XML_file = $svea_XMLWriter->outputMemory();
+
+  $data = array();
+  $data['message'] = base64_encode($XML_file);
+  $data['merchantid'] = variable_get('uc_svea_merchantid', '');
+  $data['mac'] = hash('sha512', $data['message'] . variable_get('uc_svea_secretword', ''));
+
+  $ch = curl_init();
+  curl_setopt($ch, CURLOPT_URL, $server);
+  curl_setopt($ch, CURLOPT_VERBOSE, 0);
+  curl_setopt($ch, CURLOPT_POST, TRUE);
+  curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data, '', '&'));
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
+  curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 0);
+  $response = curl_exec($ch);
+  if ($error = curl_error($ch)) {
+    watchdog('uc_sveawebpay', '!error', array('!error' => $error), WATCHDOG_ERROR);
+  }
+  curl_close($ch);
+
+  $response = _uc_sveawebpay_decode_response($response, FALSE);
+  $answer = _uc_sveawebpay_decode_response($response['response']['message']);
+
+  if ($answer['response']['statuscode'] != UC_SVEAWEBPAY_SUCCESS) {
+    $error = _uc_sveawebpay_error_handler($answer['response']['statuscode']);
+    drupal_set_message(t('Error trying to read payment methods (Error code: @error_code - @description)', array('@error_code' => $answer['response']['statuscode'], '@description' => $error ['description'])), 'error');
+    return NULL;
+  }
+  unset($answer['response']['statuscode']);
+  $xml = simplexml_load_string(base64_decode($response['response']['message']));
+  $json = json_encode($xml);
+  $return = json_decode($json, TRUE);
+
+  return $return;
+}
+

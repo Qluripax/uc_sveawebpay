@@ -1,0 +1,14 @@
+diff --git a/uc_vat.module b/uc_vat.module
+index 0259e46..4070df4 100644
+--- a/uc_vat.module
++++ b/uc_vat.module
+@@ -903,7 +903,8 @@ function uc_vat_apply_tax($order, $tax) {
+       $taxable_amount += $other_tax->amount;
+     }
+   }
+-  $amount = $taxable_amount * $tax->rate;
++  //$taxable_amount is inclusive of VAT as patch #898776-9 was applied to ubercart 6.x-2.6  
++  $amount = $taxable_amount - ($taxable_amount / (1 + $tax->rate));
+   if ($amount) {
+     $line_item = (object)array(
+       'id' => $tax->id,

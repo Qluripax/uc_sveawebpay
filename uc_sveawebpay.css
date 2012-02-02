@@ -1,0 +1,7 @@
+.confirm-invoice h3 {
+  margin-bottom: 0;
+}
+
+span.invoice_vat {
+  font-style: italic;
+}
